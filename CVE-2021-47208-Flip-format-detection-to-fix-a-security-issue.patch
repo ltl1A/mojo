@@ -1,0 +1,701 @@
+From a0c4576ffb11c235088550de9ba7ac4196e1953c Mon Sep 17 00:00:00 2001
+From: Sebastian Riedel <sri@cpan.org>
+Date: Sat, 20 Mar 2021 02:42:30 +0100
+Subject: [PATCH] Flip format detection to fix a security issue (closes #1736)
+
+---
+ Changes                              | 16 ++++++++-
+ lib/Mojolicious/Guides/Routing.pod   | 37 ++++++--------------
+ lib/Mojolicious/Guides/Tutorial.pod  | 33 +++++-------------
+ lib/Mojolicious/Lite.pm              |  2 +-
+ lib/Mojolicious/Routes/Match.pm      | 22 +++++++-----
+ lib/Mojolicious/Routes/Pattern.pm    | 16 ++++-----
+ lib/Mojolicious/Routes/Route.pm      |  6 ++--
+ t/mojolicious/charset_lite_app.t     |  2 +-
+ t/mojolicious/exception_lite_app.t   | 10 +++---
+ t/mojolicious/group_lite_app.t       |  2 +-
+ t/mojolicious/layouted_lite_app.t    |  2 +-
+ t/mojolicious/lib/MojoliciousTest.pm |  2 +-
+ t/mojolicious/lite_app.t             |  8 ++---
+ t/mojolicious/pattern.t              |  6 ++++
+ t/mojolicious/restful_lite_app.t     | 10 +++---
+ t/mojolicious/routes.t               | 52 +++++++++++++++-------------
+ t/mojolicious/twinkle_lite_app.t     |  2 +-
+ 17 files changed, 111 insertions(+), 117 deletions(-)
+
+diff --git a/Changes b/Changes
+index fd8affeae..cddb1b18a 100644
+--- a/Changes
++++ b/Changes
+@@ -1,5 +1,19 @@
+ 
+-9.11  2021-03-18
++9.11  2021-03-20
++  - This release contains fixes for security issues, everybody should upgrade!
++  - Disabled format detection by default to fix a vulnerability in many Mojolicious applications. From now on you have
++    to explicitly select the formats your routes are allowed to handle.
++      # /foo
++      # /foo.html
++      # /foo.json
++      $r->get('/foo')->to('bar#yada');
++    becomes
++      $r->get('/foo' => [format => ['html', 'json']])->to('bar#yada', format => undef);
++    And if you're certain your application is not vulnerable, you can also re-enable format detection, which will be
++    inherited by nested routes.
++      my $active = $r->any('/' => [format => 1]);
++      $active->get('/foo')->to('Test#first');
++      $active->put('/bar')->to('Test#second');
+   - Improved Mojo::UserAgent to include "Content-Length: 0" with non-GET requests for better compatibility with broken
+     web servers.
+ 
+diff --git a/lib/Mojolicious/Guides/Routing.pod b/lib/Mojolicious/Guides/Routing.pod
+index d7ac8be89..e81a76612 100644
+--- a/lib/Mojolicious/Guides/Routing.pod
++++ b/lib/Mojolicious/Guides/Routing.pod
+@@ -552,22 +552,22 @@ L<Mojolicious::Controller/"match">.
+ 
+ =head2 Formats
+ 
+-File extensions like C<.html> and C<.txt> at the end of a route are automatically detected and stored in the stash
+-value C<format>.
+-
+-  # /foo      -> {controller => 'foo', action => 'bar'}
+-  # /foo.html -> {controller => 'foo', action => 'bar', format => 'html'}
+-  # /foo.txt  -> {controller => 'foo', action => 'bar', format => 'txt'}
+-  $r->get('/foo')->to('foo#bar');
+-
+-This for example, allows multiple templates in different formats to share the same action code. Restrictive
+-placeholders can also be used to limit the allowed formats.
++File extensions like C<.html> and C<.txt> at the end of a route can be detected and stored in the stash value C<format>.
++Use a restrictive placeholder to declare the possible values.
+ 
+   # /foo.txt -> undef
+   # /foo.rss -> {controller => 'foo', action => 'bar', format => 'rss'}
+   # /foo.xml -> {controller => 'foo', action => 'bar', format => 'xml'}
+   $r->get('/foo' => [format => ['rss', 'xml']])->to('foo#bar');
+ 
++This for example, allows multiple templates in different formats to share the same action code. And just like with
++placeholders you can use a default value to make the format optional.
++
++  # /foo      -> {controller => 'foo', action => 'bar'}
++  # /foo.html -> {controller => 'foo', action => 'bar', format => 'html'}
++  # /foo.txt  -> {controller => 'foo', action => 'bar', format => 'txt'}
++  $r->get('/foo' => [format => ['html', 'txt']])->to('foo#bar', format => undef);
++
+ A C<format> value can also be passed to L<Mojolicious::Controller/"url_for">.
+ 
+   # /foo/23.txt -> {controller => 'foo', action => 'bar', id => 23, format => 'txt'}
+@@ -576,23 +576,6 @@ A C<format> value can also be passed to L<Mojolicious::Controller/"url_for">.
+   # Generate URL "/foo/24.txt" for route "baz"
+   my $url = $c->url_for('baz', id => 24, format => 'txt');
+ 
+-Or you can just disable format detection with a special type of restrictive placeholder, which gets inherited by nested
+-routes, and then re-enable it on demand.
+-
+-  # /foo      -> {controller => 'foo', action => 'bar'}
+-  # /foo.html -> undef
+-  $r->get('/foo' => [format => 0])->to('foo#bar');
+-
+-  # /foo      -> {controller => 'foo', action => 'bar'}
+-  # /foo.html -> undef
+-  # /baz      -> undef
+-  # /baz.txt  -> {controller => 'baz', action => 'yada', format => 'txt'}
+-  # /baz.html -> {controller => 'baz', action => 'yada', format => 'html'}
+-  # /baz.xml  -> undef
+-  my $inactive = $r->under([format => 0]);
+-  $inactive->get('/foo')->to('foo#bar');
+-  $inactive->get('/baz' => [format => ['txt', 'html']])->to('baz#yada');
+-
+ =head2 WebSockets
+ 
+ With the method L<Mojolicious::Routes::Route/"websocket"> you can restrict access to WebSocket handshakes, which are
+diff --git a/lib/Mojolicious/Guides/Tutorial.pod b/lib/Mojolicious/Guides/Tutorial.pod
+index 29632962e..26e34329a 100644
+--- a/lib/Mojolicious/Guides/Tutorial.pod
++++ b/lib/Mojolicious/Guides/Tutorial.pod
+@@ -564,14 +564,13 @@ L<Mojolicious::Lite/"under">.
+ =head2 Formats
+ 
+ Formats can be automatically detected from file extensions like C<.html>, they are used to find the right template and
+-generate the correct C<Content-Type> header.
++generate the correct C<Content-Type> header. Use a restrictive placeholder to declare the possible values.
+ 
+   use Mojolicious::Lite -signatures;
+ 
+-  # /detection
+   # /detection.html
+   # /detection.txt
+-  get '/detection' => sub ($c) {
++  get '/detection' => [format => ['html', 'txt']] => sub ($c) {
+     $c->render(template => 'detected');
+   };
+ 
+@@ -588,37 +587,21 @@ generate the correct C<Content-Type> header.
+   @@ detected.txt.ep
+   TXT was detected.
+ 
+-The default format is C<html>, and restrictive placeholders can be used to limit possible values.
++And just like with placeholders you can use a default value to make the format optional.
+ 
+   use Mojolicious::Lite -signatures;
+ 
++  # /hello
+   # /hello.json
+   # /hello.txt
+-  get '/hello' => [format => ['json', 'txt']] => sub ($c) {
+-    return $c->render(json => {hello => 'world'})
+-      if $c->stash('format') eq 'json';
++  get '/hello' => [format => ['json', 'txt']] => {format => 'txt'} => sub ($c) {
++    return $c->render(json => {hello => 'world'}) if $c->stash('format') eq 'json';
+     $c->render(text => 'hello world');
+   };
+ 
+   app->start;
+ 
+-Or you can just disable format detection with a special type of restrictive placeholder.
+-
+-  use Mojolicious::Lite;
+-
+-  # /hello
+-  get '/hello' => [format => 0] => {text => 'No format detection.'};
+-
+-  # Disable detection and allow the following routes to re-enable it on demand
+-  under [format => 0];
+-
+-  # /foo
+-  get '/foo' => {text => 'No format detection again.'};
+-
+-  # /bar.txt
+-  get '/bar' => [format => 'txt'] => {text => ' Just one format.'};
+-
+-  app->start;
++The default format is C<html> and the renderer will fall back to when necessary.
+ 
+ =head2 Content negotiation
+ 
+@@ -633,7 +616,7 @@ L<Mojolicious::Plugin::DefaultHelpers/"respond_to">.
+   # /hello.xml
+   # /hello?format=json
+   # /hello?format=xml
+-  get '/hello' => sub ($c) {
++  get '/hello' => [format => ['json', 'xml']] => {format => undef} => sub ($c) {
+     $c->respond_to(
+       json => {json => {hello => 'world'}},
+       xml  => {text => '<hello>world</hello>'},
+diff --git a/lib/Mojolicious/Lite.pm b/lib/Mojolicious/Lite.pm
+index f6b3aecb7..bbdf80445 100644
+--- a/lib/Mojolicious/Lite.pm
++++ b/lib/Mojolicious/Lite.pm
+@@ -300,7 +300,7 @@ L<Mojolicious::Guides::Tutorial> and L<Mojolicious::Guides::Routing> for more in
+   my $route = under '/:foo' => {foo => 'bar'};
+   my $route = under '/:foo' => [foo => qr/\w+/];
+   my $route = under '/:foo' => (agent => qr/Firefox/);
+-  my $route = under [format => 0];
++  my $route = under [format => ['json', 'yaml']];
+ 
+ Generate nested route with L<Mojolicious::Routes::Route/"under">, to which all following routes are automatically
+ appended. See L<Mojolicious::Guides::Tutorial> and L<Mojolicious::Guides::Routing> for more information.
+diff --git a/lib/Mojolicious/Routes/Match.pm b/lib/Mojolicious/Routes/Match.pm
+index 4e1ffb735..e871d5518 100644
+--- a/lib/Mojolicious/Routes/Match.pm
++++ b/lib/Mojolicious/Routes/Match.pm
+@@ -13,20 +13,24 @@ sub path_for {
+   my ($self, $name, %values) = (shift, Mojo::Util::_options(@_));
+ 
+   # Current route
+-  my $route;
+-  if (!$name || $name eq 'current') { return {} unless $route = $self->endpoint }
++  my ($route, $current);
++  if (!$name || $name eq 'current') {
++    return {} unless $route = $self->endpoint;
++    $current = 1;
++  }
+ 
+   # Find endpoint
+   else { return {path => $name} unless $route = $self->root->lookup($name) }
+ 
+   # Merge values (clear format)
+-  my $captures = $self->stack->[-1] // {};
+-  %values = (%$captures, format => undef, %values);
+-  my $pattern = $route->pattern;
+-  $values{format} //= defined $captures->{format} ? $captures->{format} : $pattern->defaults->{format}
+-    if $pattern->constraints->{format};
+-
+-  my $path = $route->render(\%values);
++  my $captures    = $self->stack->[-1] // {};
++  my %merged      = (%$captures, format => undef, %values);
++  my $pattern     = $route->pattern;
++  my $constraints = $pattern->constraints;
++  $merged{format} = ($current ? $captures->{format} : undef) // $pattern->defaults->{format}
++    if !exists $values{format} && $constraints->{format} && $constraints->{format} ne '1';
++
++  my $path = $route->render(\%merged);
+   return {path => $path, websocket => $route->has_websocket};
+ }
+ 
+diff --git a/lib/Mojolicious/Routes/Pattern.pm b/lib/Mojolicious/Routes/Pattern.pm
+index 30bd2c5c8..17110137b 100644
+--- a/lib/Mojolicious/Routes/Pattern.pm
++++ b/lib/Mojolicious/Routes/Pattern.pm
+@@ -125,23 +125,23 @@ sub _compile {
+   $regex = $block . $regex if $block;
+ 
+   # Format
+-  $regex .= _compile_format($constraints->{format}, $defaults->{format}) if $detect;
++  $regex .= _compile_format($constraints->{format}, exists $defaults->{format}) if $detect;
+ 
+   $self->regex(qr/^$regex/ps);
+ }
+ 
+ sub _compile_format {
+-  my ($format, $default) = @_;
+-
+-  # Default regex
+-  return '/?(?:\.([^/]+))?$' unless defined $format;
++  my ($format, $has_default) = @_;
+ 
+   # No regex
+   return '' unless $format;
+ 
++  # Default regex
++  return '/?(?:\.([^/]+))?$' if $format eq '1';
++
+   # Compile custom regex
+   my $regex = '\.' . _compile_req($format);
+-  return $default ? "/?(?:$regex)?\$" : "/?$regex\$";
++  return $has_default ? "/?(?:$regex)?\$" : "/?$regex\$";
+ }
+ 
+ sub _compile_req {
+@@ -344,7 +344,7 @@ Match pattern against path and remove matching parts, format detection is disabl
+   my $pattern = Mojolicious::Routes::Pattern->new;
+   my $pattern = Mojolicious::Routes::Pattern->new('/users/:id');
+   my $pattern = Mojolicious::Routes::Pattern->new('/user/:id', id => qr/\d+/);
+-  my $pattern = Mojolicious::Routes::Pattern->new(format => 0);
++  my $pattern = Mojolicious::Routes::Pattern->new(format => ['json', 'yaml']);
+ 
+ Construct a new L<Mojolicious::Routes::Pattern> object and L</"parse"> pattern if necessary.
+ 
+@@ -352,7 +352,7 @@ Construct a new L<Mojolicious::Routes::Pattern> object and L</"parse"> pattern i
+ 
+   $pattern = $pattern->parse('/user/:id');
+   $pattern = $pattern->parse('/user/:id', id=> qr/\d+/);
+-  $pattern = $pattern->parse(format => 0);
++  $pattern = $pattern->parse(format => ['json', 'yaml']);
+ 
+ Parse pattern.
+ 
+diff --git a/lib/Mojolicious/Routes/Route.pm b/lib/Mojolicious/Routes/Route.pm
+index 5d8532647..2b2f723c9 100644
+--- a/lib/Mojolicious/Routes/Route.pm
++++ b/lib/Mojolicious/Routes/Route.pm
+@@ -221,7 +221,7 @@ sub _route {
+   croak qq{Route pattern "@{[$route->pattern->unparsed]}" contains a reserved stash value}
+     if grep { $self->is_reserved($_) } @{$route->pattern->placeholders};
+   my $format = $self->pattern->constraints->{format};
+-  $route->pattern->constraints->{format} //= 0 if defined $format && !$format;
++  $route->pattern->constraints->{format} //= 1 if defined $format && $format eq '1';
+ 
+   return $route;
+ }
+@@ -461,7 +461,7 @@ L<Mojolicious::Guides::Routing> for more information.
+ 
+   $r = $r->parse('/user/:id');
+   $r = $r->parse('/user/:id', id => qr/\d+/);
+-  $r = $r->parse(format => 0);
++  $r = $r->parse(format => ['json', 'yaml']);
+ 
+ Parse pattern.
+ 
+@@ -589,7 +589,7 @@ Stringify the whole route.
+   my $route = $r->under('/:foo' => {foo => 'bar'});
+   my $route = $r->under('/:foo' => [foo => qr/\w+/]);
+   my $route = $r->under('/:foo' => (agent => qr/Firefox/));
+-  my $route = $r->under([format => 0]);
++  my $route = $r->under([format => ['json', 'yaml']]);
+ 
+ Generate L<Mojolicious::Routes::Route> object for a nested route with its own intermediate destination, takes the same
+ arguments as L</"any"> (except for the HTTP methods to match, which are not available). See
+diff --git a/t/mojolicious/charset_lite_app.t b/t/mojolicious/charset_lite_app.t
+index 7113e4a6a..4197add69 100644
+--- a/t/mojolicious/charset_lite_app.t
++++ b/t/mojolicious/charset_lite_app.t
+@@ -27,7 +27,7 @@ app->renderer->add_handler(
+   }
+ );
+ 
+-get '/' => 'index';
++get '/' => [format => [$yatta]] => {format => undef} => 'index';
+ 
+ post '/' => sub {
+   my $c = shift;
+diff --git a/t/mojolicious/exception_lite_app.t b/t/mojolicious/exception_lite_app.t
+index 83a0583c6..6994ede4a 100644
+--- a/t/mojolicious/exception_lite_app.t
++++ b/t/mojolicious/exception_lite_app.t
+@@ -51,11 +51,11 @@ get '/custom_exception' => sub { die Mojo::Base->new };
+ 
+ get '/dead_template';
+ 
+-get '/dead_template_too';
++get '/dead_template_too' => [format => ['xml']];
+ 
+-get '/dead_handler' => {handler => 'dead'};
++get '/dead_handler' => [format => ['xml']] => {handler => 'dead'};
+ 
+-get '/dead_action_epl' => {handler => 'epl'} => sub {
++get '/dead_action_epl' => [format => ['xml']] => {handler => 'epl'} => sub {
+   die "dead action epl!\n";
+ };
+ 
+@@ -63,7 +63,7 @@ get '/dead_included_template';
+ 
+ get '/dead_template_with_layout';
+ 
+-get '/dead_action' => sub { die "dead action!\n" };
++get '/dead_action' => [format => ['xml', 'json']] => {format => undef} => sub { die "dead action!\n" };
+ 
+ get '/double_dead_action_☃' => sub {
+   eval { die 'double dead action!' };
+@@ -76,7 +76,7 @@ get '/trapped' => sub {
+   $c->render(text => $@->{foo} || 'failed');
+ };
+ 
+-get '/missing_template' => {exception => 'whatever'};
++get '/missing_template' => [format => ['xml', 'json', 'txt']] => {exception => 'whatever', format => undef};
+ 
+ get '/missing_template/too' => sub {
+   my $c = shift;
+diff --git a/t/mojolicious/group_lite_app.t b/t/mojolicious/group_lite_app.t
+index 9899987c0..5748767fd 100644
+--- a/t/mojolicious/group_lite_app.t
++++ b/t/mojolicious/group_lite_app.t
+@@ -162,7 +162,7 @@ group {
+     return !!0;
+   };
+ 
+-  get '/authgroup' => {text => "You're ok."};
++  get '/authgroup' => [format => ['txt']] => {text => "You're ok.", format => undef};
+ };
+ 
+ get '/noauthgroup' => {inline => 'Whatever <%= $foo %>.'};
+diff --git a/t/mojolicious/layouted_lite_app.t b/t/mojolicious/layouted_lite_app.t
+index 77e248b87..8756f9658 100644
+--- a/t/mojolicious/layouted_lite_app.t
++++ b/t/mojolicious/layouted_lite_app.t
+@@ -101,7 +101,7 @@ get '/inline/again' => {inline => 0};
+ 
+ get '/data' => {data => 0};
+ 
+-get '/variants' => {layout => 'variants'} => sub {
++get '/variants' => [format => ['txt']] => {layout => 'variants', format => undef} => sub {
+   my $c = shift;
+   $c->stash->{variant} = $c->param('device');
+   $c->render('variants');
+diff --git a/t/mojolicious/lib/MojoliciousTest.pm b/t/mojolicious/lib/MojoliciousTest.pm
+index c83aff158..0dcf88346 100644
+--- a/t/mojolicious/lib/MojoliciousTest.pm
++++ b/t/mojolicious/lib/MojoliciousTest.pm
+@@ -116,7 +116,7 @@ sub startup {
+   $r->any('/test10')->to('baz#index');
+ 
+   # /withblock (template with blocks)
+-  $r->any('/withblock')->to('foo#withBlock');
++  $r->any('/withblock', [format => ['txt']])->to('foo#withBlock');
+ 
+   # /staged (authentication with intermediate destination)
+   my $b = $r->any('/staged')->inline(1)->to('foo#stage1', return => 1);
+diff --git a/t/mojolicious/lite_app.t b/t/mojolicious/lite_app.t
+index 902420f5a..31b3037ca 100644
+--- a/t/mojolicious/lite_app.t
++++ b/t/mojolicious/lite_app.t
+@@ -76,7 +76,7 @@ get '/unicode/:0' => sub {
+   $c->render(text => $c->param('0') . $c->url_for);
+ };
+ 
+-get '/' => 'root';
++get '/' => [format => ['html']] => {format => undef} => 'root';
+ 
+ get '/alternatives/:char' => [char => [qw(☃ ♥)]] => sub {
+   my $c = shift;
+@@ -132,7 +132,7 @@ get '/template/exception' => 'dies_too';
+ 
+ get '/with-format' => {format => 'html'} => 'with-format';
+ 
+-get '/without-format' => 'without-format';
++get '/without-format' => [format => ['html']] => {format => undef} => 'without-format';
+ 
+ any '/json_too' => {json => {hello => 'world'}};
+ 
+@@ -198,9 +198,9 @@ get '/привет/мир' => sub { shift->render(text => 'привет мир')
+ 
+ get '/root.html' => 'root_path';
+ 
+-get '/root' => sub { shift->render(text => 'root fallback!') };
++get '/root' => [format => ['txt']] => {format => undef} => sub { shift->render(text => 'root fallback!') };
+ 
+-get '/template.txt' => {template => 'template', format => 'txt'};
++get '/template.txt' => [format => ['epl']] => {template => 'template', format => 'txt'};
+ 
+ get ':number' => [number => qr/0/] => sub {
+   my $c   = shift;
+diff --git a/t/mojolicious/pattern.t b/t/mojolicious/pattern.t
+index 554415a02..e63e1506c 100644
+--- a/t/mojolicious/pattern.t
++++ b/t/mojolicious/pattern.t
+@@ -126,6 +126,7 @@ is $pattern->render({test => $value}), "/$value", 'right result';
+ # Format detection
+ $pattern = Mojolicious::Routes::Pattern->new('/test');
+ $pattern->defaults({action => 'index'});
++$pattern->constraints({format => 1});
+ ok !$pattern->regex, 'no regex';
+ is_deeply $pattern->match('/test.xml', 1), {action => 'index', format => 'xml'}, 'right structure';
+ ok $pattern->regex, 'regex has been compiled on demand';
+@@ -169,6 +170,11 @@ is_deeply $result, {test => 'foo', action => 'index', format => 'html'}, 'right
+ is $pattern->render($result), '/foo/v1.0', 'right result';
+ is $pattern->render($result,                     1), '/foo/v1.0.html', 'right result';
+ is $pattern->render({%$result, format => undef}, 1), '/foo/v1.0',      'right result';
++
++# Versioned pattern with format
++$pattern = Mojolicious::Routes::Pattern->new('/:test/v1.0');
++$pattern->defaults({action => 'index', format => 'html'});
++$pattern->constraints({format => ['txt']});
+ $result = $pattern->match('/foo/v1.0.txt', 1);
+ is_deeply $result, {test => 'foo', action => 'index', format => 'txt'}, 'right structure';
+ is $pattern->render($result), '/foo/v1.0', 'right result';
+diff --git a/t/mojolicious/restful_lite_app.t b/t/mojolicious/restful_lite_app.t
+index 489d15ee6..c4c3578fa 100644
+--- a/t/mojolicious/restful_lite_app.t
++++ b/t/mojolicious/restful_lite_app.t
+@@ -7,24 +7,24 @@ use Test::More;
+ use Mojo::JSON qw(false true);
+ use Mojolicious::Lite;
+ 
+-any [qw(POST PUT)] => '/json/echo' => sub {
++any [qw(POST PUT)] => '/json/echo' => [format => ['json']] => {format => undef} => sub {
+   my $c = shift;
+   $c->respond_to(json => {json => $c->req->json});
+ };
+ 
+-get '/accepts' => sub {
++get '/accepts' => [format => ['html', 'json', 'txt', 'xml']] => {format => undef} => sub {
+   my $c = shift;
+   $c->render(json => {best => $c->accepts('html', 'json', 'txt')});
+ };
+ 
+-get '/wants_json' => sub {
++get '/wants_json' => [format => ['json', 'xml']] => {format => undef} => sub {
+   my $c = shift;
+   $c->render(json => {wants_json => $c->accepts('', 'json') ? \1 : \0});
+ };
+ 
+ under '/rest';
+ 
+-get sub {
++get [format => ['json', 'html', 'xml']] => {format => undef} => sub {
+   my $c = shift;
+   $c->respond_to(
+     json => sub { $c->render(json => {just => 'works'}) },
+@@ -33,7 +33,7 @@ get sub {
+   );
+ };
+ 
+-post sub {
++post [format => ['json', 'html', 'xml', 'png']] => {format => undef} => sub {
+   my $c = shift;
+   $c->respond_to(
+     json => {json => {just => 'works too'}},
+diff --git a/t/mojolicious/routes.t b/t/mojolicious/routes.t
+index bd028a480..fc19966ef 100644
+--- a/t/mojolicious/routes.t
++++ b/t/mojolicious/routes.t
+@@ -36,12 +36,12 @@ $r->any('/alternatives4/:foo', [foo => [qw(foo foo.bar)]]);
+ 
+ # /optional/*
+ # /optional/*/*
+-$r->any('/optional/:foo/:bar')->to(bar => 'test');
++$r->any('/optional/:foo/:bar', [format => 1])->to(bar => 'test');
+ 
+ # /optional2
+ # /optional2/*
+ # /optional2/*/*
+-$r->any('/optional2/:foo')->to(foo => 'one')->any('/:bar')->to(bar => 'two');
++$r->any('/optional2/:foo', [format => 1])->to(foo => 'one')->any('/:bar')->to(bar => 'two');
+ 
+ # /*/test
+ my $test = $r->any('/:testcase/test')->to(action => 'test');
+@@ -86,8 +86,8 @@ $r->any('/wildcards/3/<*wildcard>/foo')->to(testcase => 'very', action => 'dange
+ $r->any('/wildcards/4/*wildcard/foo')->to(testcase => 'somewhat', action => 'dangerous');
+ 
+ # /format
+-# /format.html
+-$r->any('/format')->to(testcase => 'hello')->to(action => 'you', format => 'html');
++# /format.*
++$r->any('/format', [format => 1])->to(testcase => 'hello')->to(action => 'you', format => 'html');
+ 
+ # /format2.txt
+ $r->any('/format2', [format => qr/txt/])->to(testcase => 'we', action => 'howdy');
+@@ -117,12 +117,15 @@ $r->any('/type/<id:my_num>')->to('foo#bar');
+ 
+ # /articles/1/edit
+ # /articles/1/delete
++# /articles/1/delete.json
+ my $inline = $r->any('/articles/:id')->inline(1)->to(testcase => 'articles', action => 'load', format => 'html');
+ $inline->any('/edit')->to(testcase => 'articles', action => 'edit');
+-$inline->any('/delete')->to(testcase => 'articles', action => 'delete', format => undef)->name('articles_delete');
++$inline->any('/delete', [format => ['json']])->to(testcase => 'articles', action => 'delete', format => undef)
++  ->name('articles_delete');
+ 
+ # GET /method/get
+-$r->any('/method/get')->methods('GET')->to(testcase => 'method', action => 'get');
++$r->any('/method/get', [format => ['html']])->methods('GET')
++  ->to(testcase => 'method', action => 'get', format => undef);
+ 
+ # POST /method/post
+ $r->any('/method/post')->methods('post')->to(testcase => 'method', action => 'post');
+@@ -142,8 +145,8 @@ $r->any('/regex/alternatives/:alternatives', [alternatives => qr/foo|bar|baz/])
+ # /versioned/2.4/test
+ # /versioned/2.4/test.xml
+ my $versioned = $r->any('/versioned');
+-$versioned->any('/1.0')->to(testcase => 'bar')->any('/test')->to(action => 'baz');
+-$versioned->any('/2.4')->to(testcase => 'foo')->any('/test')->to(action => 'bar');
++$versioned->any('/1.0')->to(testcase => 'bar')->any('/test', [format => ['xml']])->to(action => 'baz', format => undef);
++$versioned->any('/2.4')->to(testcase => 'foo')->any('/test', [format => ['xml']])->to(action => 'bar', format => undef);
+ 
+ # /versioned/too/1.0
+ my $too = $r->any('/versioned/too')->to('too#');
+@@ -158,7 +161,7 @@ $multi->any('/bar.baz')->to('works#too', format => 'xml');
+ # /nodetect
+ # /nodetect2.txt
+ # /nodetect2.html
+-my $inactive = $r->any('/', [format => 0]);
++my $inactive = $r->any('/');
+ $inactive->any('/nodetect')->to('foo#none');
+ $inactive->any('/nodetect2', [format => ['txt', 'html']])->to('bar#hyper');
+ 
+@@ -169,8 +172,8 @@ $inactive->any('/nodetect2', [format => ['txt', 'html']])->to('bar#hyper');
+ # /source/third.xml
+ my $source = $r->any('/source')->to('source#');
+ my $first  = $source->any('/', [format => 0])->any('/first')->to('#first');
+-$source->any('/second')->to('#second');
+-my $third  = $source->any('/third')->to('#third');
++$source->any('/second', [format => ['xml']])->to('#second', format => undef);
++my $third  = $source->any('/third', [format => ['xml']])->to('#third', format => undef);
+ my $target = $r->remove->any('/target')->to('target#');
+ my $second = $r->find('second');
+ is $second->render({}), '/source/second', 'right result';
+@@ -183,7 +186,8 @@ is $second->render({}), '/target/second', 'right result';
+ $r->websocket('/websocket' => {testcase => 'ws'})->any('/')->to(action => 'just')->any->to(works => 1);
+ 
+ # /slash
+-$r->any('/slash')->to(testcase => 'just')->any('/')->to(action => 'slash');
++# /slash.txt
++$r->any('/slash')->to(testcase => 'just')->any('/', [format => ['txt']])->to(action => 'slash', format => undef);
+ 
+ # /missing/*/name
+ # /missing/too
+@@ -240,7 +244,7 @@ is $r->find('very_clean')->to_string,      '/clean',               'right patter
+ is $r->find('0')->to_string,               '/0',                   'right pattern';
+ is $r->find('test_edit')->to_string,       '/:testcase/test/edit', 'right pattern';
+ is $r->find('articles_delete')->to_string, '/articles/:id/delete', 'right pattern';
+-is $r->find('nodetect')->pattern->constraints->{format}, 0, 'right value';
++ok !$r->find('nodetect')->pattern->constraints->{format}, 'no value';
+ is $r->find('nodetect')->to->{controller}, 'foo', 'right testcase';
+ 
+ # Null route
+@@ -404,7 +408,7 @@ $m->find($c => {method => 'GET', path => '/articles/1/delete.json'});
+   {testcase => 'articles', action => 'delete', id => 1, format => 'json'}
+ );
+ is_deeply $m->stack, \@stack, 'right structure';
+-is $m->path_for->{path}, '/articles/1/delete', 'right path';
++is $m->path_for->{path}, '/articles/1/delete.json', 'right path';
+ 
+ # Root
+ $m = Mojolicious::Routes::Match->new(root => $r);
+@@ -611,7 +615,7 @@ is_deeply $m->stack, [], 'empty stack';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/method/get.html'});
+ is_deeply $m->stack, [{testcase => 'method', action => 'get', format => 'html'}], 'right structure';
+-is $m->path_for->{path}, '/method/get', 'right path';
++is $m->path_for->{path}, '/method/get.html', 'right path';
+ is $m->endpoint->suggested_method, 'GET', 'right method';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'POST', path => '/method/post'});
+@@ -665,20 +669,20 @@ is_deeply $m->stack, [], 'empty stack';
+ # Route with version
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/versioned/1.0/test'});
+-is_deeply $m->stack, [{testcase => 'bar', action => 'baz'}], 'right structure';
++is_deeply $m->stack, [{testcase => 'bar', action => 'baz', format => undef}], 'right structure';
+ is $m->path_for->{path}, '/versioned/1.0/test', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/versioned/1.0/test.xml'});
+ is_deeply $m->stack, [{testcase => 'bar', action => 'baz', format => 'xml'}], 'right structure';
+-is $m->path_for->{path}, '/versioned/1.0/test', 'right path';
++is $m->path_for->{path}, '/versioned/1.0/test.xml', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/versioned/2.4/test'});
+-is_deeply $m->stack, [{testcase => 'foo', action => 'bar'}], 'right structure';
++is_deeply $m->stack, [{testcase => 'foo', action => 'bar', format => undef}], 'right structure';
+ is $m->path_for->{path}, '/versioned/2.4/test', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/versioned/2.4/test.xml'});
+ is_deeply $m->stack, [{testcase => 'foo', action => 'bar', format => 'xml'}], 'right structure';
+-is $m->path_for->{path}, '/versioned/2.4/test', 'right path';
++is $m->path_for->{path}, '/versioned/2.4/test.xml', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/versioned/3.0/test'});
+ is_deeply $m->stack, [], 'empty stack';
+@@ -748,23 +752,23 @@ $m->find($c => {method => 'GET', path => '/source/first'});
+ is_deeply $m->stack, [], 'empty stack';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/target/second'});
+-is_deeply $m->stack, [{controller => 'target', action => 'second'}], 'right structure';
++is_deeply $m->stack, [{controller => 'target', action => 'second', format => undef}], 'right structure';
+ is $m->path_for->{path}, '/target/second', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/target/second.xml'});
+ is_deeply $m->stack, [{controller => 'target', action => 'second', format => 'xml'}], 'right structure';
+-is $m->path_for->{path}, '/target/second', 'right path';
++is $m->path_for->{path}, '/target/second.xml', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/source/second'});
+ is_deeply $m->stack, [], 'empty stack';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/source/third'});
+-is_deeply $m->stack, [{controller => 'source', action => 'third'}], 'right structure';
++is_deeply $m->stack, [{controller => 'source', action => 'third', format => undef}], 'right structure';
+ is $m->path_for->{path}, '/source/third', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/source/third.xml'});
+ is_deeply $m->stack, [{controller => 'source', action => 'third', format => 'xml'}], 'right structure';
+-is $m->path_for->{path}, '/source/third', 'right path';
++is $m->path_for->{path}, '/source/third.xml', 'right path';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/target/third'});
+ is_deeply $m->stack, [], 'empty stack';
+@@ -782,7 +786,7 @@ ok $m->path_for->{websocket}, 'is a websocket';
+ $m = Mojolicious::Routes::Match->new(root => $r);
+ $m->find($c => {method => 'GET', path => '/slash.txt'});
+ is_deeply $m->stack, [{testcase => 'just', action => 'slash', format => 'txt'}], 'right structure';
+-is $m->path_for->{path}, '/slash', 'right path';
++is $m->path_for->{path}, '/slash.txt', 'right path';
+ ok !$m->path_for->{websocket}, 'not a websocket';
+ is $m->path_for(format => 'html')->{path}, '/slash.html', 'right path';
+ 
+diff --git a/t/mojolicious/twinkle_lite_app.t b/t/mojolicious/twinkle_lite_app.t
+index 7846187e6..cb66ad0e5 100644
+--- a/t/mojolicious/twinkle_lite_app.t
++++ b/t/mojolicious/twinkle_lite_app.t
+@@ -51,7 +51,7 @@ get '/' => {name => '<sebastian>'} => 'index';
+ 
+ get '/advanced' => 'advanced';
+ 
+-get '/rest' => sub {
++get '/rest' => [format => 'html'] => {format => undef} => sub {
+   shift->respond_to(foo => {text => 'foo works!'}, html => {text => 'html works!'})
+     ->res->headers->header('X-Rest' => 1);
+ };
+-- 
+2.25.1
+
