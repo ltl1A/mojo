@@ -1,0 +1,48 @@
+From 03bf428a4fbd0f3be055f5fac1c6d1f2a233ca32 Mon Sep 17 00:00:00 2001
+From: Robert Rothenberg <rrwo@cpan.org>
+Date: Sat, 7 Nov 2020 14:04:59 +0000
+Subject: [PATCH] Mojo::Util#secure_compare fix leak of string length #1599
+
+By immediately returning when the two strings are not the
+same length, the function allows an attacker to guess the
+length of the secret string using timing attacks.
+
+This change uses a fix by @jberger, based on [1].
+
+This also updates the documentation to emphasize that the
+secret string should be the second argument (although it's
+not critical).
+
+[1] https://github.com/vadimdemedes/secure-compare/blob/master/index.js
+---
+ lib/Mojo/Util.pm | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/lib/Mojo/Util.pm b/lib/Mojo/Util.pm
+index 630607490..616afbc73 100644
+--- a/lib/Mojo/Util.pm
++++ b/lib/Mojo/Util.pm
+@@ -276,8 +276,8 @@ sub scope_guard { Mojo::Util::_Guard->new(cb => shift) }
+ 
+ sub secure_compare {
+   my ($one, $two) = @_;
+-  return undef if length $one != length $two;
+-  my $r = 0;
++  my $r = length $one != length $two;
++  $two = $one if $r;
+   $r |= ord(substr $one, $_) ^ ord(substr $two, $_) for 0 .. length($one) - 1;
+   return $r == 0;
+ }
+@@ -792,7 +792,8 @@ Create anonymous scope guard object that will execute the passed callback when t
+ 
+   my $bool = secure_compare $str1, $str2;
+ 
+-Constant time comparison algorithm to prevent timing attacks.
++Constant time comparison algorithm to prevent timing attacks. The secret string should be the second argument, to
++avoid leaking information about the length of the string.
+ 
+ =head2 sha1_bytes
+ 
+-- 
+2.25.1
+
